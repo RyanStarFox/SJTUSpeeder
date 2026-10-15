@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SJTUSpeedup — 课堂回看倍速
 // @namespace    https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/
-// @version      1.0.6
+// @version      1.0.7
 // @description  为交大课堂回看增加更多倍速、记忆上次倍速，并支持长按 O/P 临时变速
 // @author       SJTUSpeedup
 // @match        https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/*
@@ -317,26 +317,56 @@
     return { empty, mediaTime: 0 };
   }
 
+  function hevcCodecString(sampleType, desc) {
+    if (!desc || desc.length < 13) return '';
+    const profileSpace = (desc[1] >> 6) & 3;
+    const profileIdc = desc[1] & 0x1f;
+    const tier = desc[1] & 0x20 ? 'H' : 'L';
+    const compat = ((desc[2] << 24) | (desc[3] << 16) | (desc[4] << 8) | desc[5]) >>> 0;
+    const space = ['', 'A', 'B', 'C'][profileSpace];
+    let codec = sampleType + '.' + space + profileIdc + '.' + compat.toString(16).toUpperCase();
+    codec += '.' + tier + desc[12];
+    let constraints = '';
+    let started = false;
+    for (let i = 11; i >= 6; i -= 1) {
+      if (desc[i] || started) {
+        constraints = '.' + desc[i].toString(16).toUpperCase() + constraints;
+        started = true;
+      }
+    }
+    return codec + constraints;
+  }
+
   function parseAvc(bytes, o, size, header) {
     const end = o + size;
     let p = o + header + 8;
     if (p + 8 > end) return null;
     const entrySize = readU32(bytes, p);
     const codecType = readType(bytes, p + 4);
-    if (codecType !== 'avc1' && codecType !== 'avc3') return null;
+    const hevc = codecType === 'hvc1' || codecType === 'hev1';
+    if (codecType !== 'avc1' && codecType !== 'avc3' && !hevc) {
+      console.info('[SJTUSpeedup] 这路画面编码是 ' + codecType + '，高于 2 倍时 Safari 仍只会跳关键帧。');
+      return null;
+    }
     let c = p + 86;
     const entryEnd = Math.min(end, p + entrySize);
     while (c + 8 <= entryEnd) {
       const csz = readU32(bytes, c);
       const ct = readType(bytes, c + 4);
       if (csz < 8 || c + csz > entryEnd) break;
-      if (ct === 'avcC') {
+      if (ct === 'avcC' && !hevc) {
         const description = bytes.slice(c + 8, c + csz);
         if (description.length < 4) return null;
         const hex = [description[1], description[2], description[3]]
           .map((b) => b.toString(16).padStart(2, '0'))
           .join('');
         return { codec: 'avc1.' + hex, description };
+      }
+      if (ct === 'hvcC' && hevc) {
+        const description = bytes.slice(c + 8, c + csz);
+        const codec = hevcCodecString(codecType, description);
+        if (!codec) return null;
+        return { codec, description };
       }
       c += csz;
     }
@@ -615,7 +645,7 @@
           this.queue.push(frame);
         },
         error: (error) => {
-          log('smooth decode', error);
+          console.info('[SJTUSpeedup] 逐帧解码失败，高于 2 倍会退回只跳关键帧。', error);
           this.fail();
         },
       });
@@ -691,6 +721,7 @@
       }
       this.decoder = null;
       this.canvas.remove();
+      this.video.classList.remove('sjtu-smooth-covered');
     }
 
     mediaNow() {
@@ -758,6 +789,9 @@
         this.canvas.height = frame.displayHeight || this.video.videoHeight || 1080;
       }
       this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
+      if (!this.video.classList.contains('sjtu-smooth-covered')) {
+        this.video.classList.add('sjtu-smooth-covered');
+      }
     }
 
     findChunk(offset, size) {
@@ -943,7 +977,7 @@
         .catch((error) => {
           if (video.__sjtuSmoothToken === token) video.__sjtuSmoothToken = null;
           smoothFailed.add(video);
-          log('smooth index', error);
+          console.info('[SJTUSpeedup] 读不到这路画面的编码，高于 2 倍仍会只跳关键帧。', error);
         });
     }
     for (const video of [...smoothItems.keys()]) {
@@ -1200,7 +1234,11 @@
       .sjtu-smooth-canvas {
         position: absolute;
         pointer-events: none;
-        z-index: 1;
+        z-index: 2;
+        background: #000;
+      }
+      video.sjtu-smooth-covered {
+        opacity: 0 !important;
       }
     `;
     (document.head || document.documentElement).appendChild(style);
@@ -1374,7 +1412,7 @@
     setInterval(tick, 500);
 
     console.info(
-      `[SJTUSpeedup] v1.0.6 active — base ${formatControlRate(controller.getBaseRate())}. Hold O/P 0.5s to temp slow/boost.`
+      `[SJTUSpeedup] v1.0.7 active — base ${formatControlRate(controller.getBaseRate())}. Hold O/P 0.5s to temp slow/boost.`
     );
   }
 

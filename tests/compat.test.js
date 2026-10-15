@@ -52,6 +52,7 @@ for (const name of [
   'needsSmoothRate',
   'sampleAtTime',
   'shouldResyncClock',
+  'hevcCodecString',
 ]) {
   // eslint-disable-next-line no-new-func
   sandbox[name] = new Function(
@@ -83,5 +84,10 @@ assert.strictEqual(sandbox.sampleAtTime(pts, key, 0), 0);
 assert.strictEqual(sandbox.shouldResyncClock(-0.6, 0), true);
 assert.strictEqual(sandbox.shouldResyncClock(3, 3), false);
 assert.strictEqual(sandbox.shouldResyncClock(3, 9), true);
+const hevcDesc = new Uint8Array(13);
+hevcDesc[1] = 1;
+hevcDesc[2] = 0x60;
+hevcDesc[12] = 93;
+assert.strictEqual(sandbox.hevcCodecString('hvc1', hevcDesc), 'hvc1.1.60000000.L93');
 
 console.log('sjtu speeder compat: ok');

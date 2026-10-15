@@ -4,7 +4,7 @@
 
 同一套交互来自 [SpeedUp](https://github.com/RyanStarFox/SpeedUp)：记住倍速、短按前进后退、长按临时变速。教师画面和 PPT 会一起改速。
 
-当前版本：**1.0.6**。
+当前版本：**1.0.7**。
 
 ## 安装
 
@@ -14,7 +14,7 @@ Safari、Chrome、Edge、Firefox 用的是同一份 [`sjtu-speedup.user.js`](./s
 2. **Chrome / Edge 138+**：在扩展详情里打开「允许运行用户脚本 / Allow User Scripts」，否则脚本不会执行。
 3. 新建脚本，把 `sjtu-speedup.user.js` 全文粘贴进去并保存。
 4. 打开课堂回看页，硬刷新（Cmd/Ctrl+Shift+R）。
-5. 控制栏「倍速」上悬停，应看到 `3X` … `0.5X` 和最上面的自定义输入框。控制台应有：`[SJTUSpeedup] v1.0.6 active`。
+5. 控制栏「倍速」上悬停，应看到 `3X` … `0.5X` 和最上面的自定义输入框。控制台应有：`[SJTUSpeedup] v1.0.7 active`。
 
 ## 功能
 
