@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SJTUSpeedup — 课堂回看倍速
 // @namespace    https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/
-// @version      1.0.2
+// @version      1.0.3
 // @description  为交大课堂回看增加更多倍速、记忆上次倍速，并支持长按 O/P 临时变速
 // @author       SJTUSpeedup
 // @match        https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/*
@@ -178,6 +178,13 @@
 
   function needsSmoothRate(rate, safariLike, hasDecoder) {
     return rate > 2 && safariLike === true && hasDecoder === true;
+  }
+
+  // 倍速大于 2 时，Safari 的 currentTime 会按关键帧向前跳。那不是用户拖进度，
+  // 重置解码器只会把正在连续播放的画面打断。只有明显后退或跳了很远才重新对齐。
+  function shouldResyncClock(delta, aheadOfPredicted) {
+    if (delta < -0.5) return true;
+    return aheadOfPredicted > 8;
   }
 
   function readU32(bytes, o) {
@@ -568,8 +575,9 @@
       this.decoder = null;
       this.queue = [];
       this.nextSample = 0;
-      this.cache = null;
-      this.cacheStart = 0;
+      this.chunks = [];
+      this.prefetch = null;
+      this.netErrors = 0;
       this.pumping = false;
       this.lastResync = 0;
       this.anchorWall = null;
@@ -614,7 +622,7 @@
         codec: this.index.codec,
         description: this.index.description,
         hardwareAcceleration: 'prefer-hardware',
-        optimizeForLatency: true,
+        optimizeForLatency: false,
       });
       this.decoder = decoder;
     }
@@ -642,7 +650,8 @@
         }
       }
       this.decoder = null;
-      this.cache = null;
+      this.chunks = [];
+      this.prefetch = null;
       this.nextSample = sampleAtTime(this.index.pts, this.index.key, this.video.currentTime);
       try {
         this.openDecoder();
@@ -695,23 +704,20 @@
       }
       const predicted = this.anchorMedia + ((now - this.anchorWall) / 1000) * rate;
       const delta = actual - this.lastActual;
-      const caughtUp = Math.abs(actual - predicted) <= 0.8;
-      if ((delta < -0.3 || delta > 1.5) && !caughtUp) {
-        this.lastActual = actual;
+      this.lastActual = actual;
+      if (shouldResyncClock(delta, actual - predicted)) {
         this.anchorMedia = actual;
         this.anchorWall = now;
         if (now - this.lastResync > 200) this.resync();
         return actual;
       }
-      if (Math.abs(delta) > 0.02) {
-        this.lastActual = actual;
+      if (Math.abs(actual - predicted) < 0.5) {
         this.anchorMedia = actual;
         this.anchorWall = now;
         return actual;
       }
-      if (now - this.anchorWall < 250) return actual;
-      if (Number.isFinite(video.duration)) return Math.min(video.duration, predicted);
-      return predicted;
+      const clock = Number.isFinite(video.duration) ? Math.min(video.duration, predicted) : predicted;
+      return Math.max(0, clock);
     }
 
     tick() {
@@ -722,8 +728,8 @@
       const cursor = Math.min(this.nextSample, this.index.count - 1);
       if (
         newest &&
-        newest.timestamp / 1e6 < t - 1.5 &&
-        this.index.pts[cursor] < t - 1.5 &&
+        newest.timestamp / 1e6 < t - 4 &&
+        this.index.pts[cursor] < t - 4 &&
         performance.now() - this.lastResync > 1000
       ) {
         this.resync();
@@ -731,7 +737,7 @@
       }
       this.place();
       this.paint(t);
-      this.pump();
+      this.pump(t);
     }
 
     paint(t) {
@@ -749,41 +755,119 @@
       this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
     }
 
-    async readSample(i) {
-      const offset = this.index.offset[i];
-      const size = this.index.size[i];
-      if (this.cache && offset >= this.cacheStart && offset + size <= this.cacheStart + this.cache.length) {
-        return this.cache.slice(offset - this.cacheStart, offset - this.cacheStart + size);
+    findChunk(offset, size) {
+      for (let i = this.chunks.length - 1; i >= 0; i -= 1) {
+        const chunk = this.chunks[i];
+        if (offset >= chunk.start && offset + size <= chunk.start + chunk.buf.length) return chunk;
       }
-      let end = offset + size;
-      const limit = offset + 1572864;
-      for (let j = i; j < this.index.count; j += 1) {
+      return null;
+    }
+
+    windowEnd(startIndex) {
+      const rate = this.video.playbackRate || 2;
+      const span = Math.min(12, Math.max(3, rate * 3));
+      const origin = this.index.pts[startIndex];
+      const offset = this.index.offset[startIndex];
+      let end = offset + this.index.size[startIndex];
+      const byteCap = offset + 8388608;
+      for (let j = startIndex; j < this.index.count; j += 1) {
+        if (this.index.pts[j] - origin > span) break;
         const sampleEnd = this.index.offset[j] + this.index.size[j];
-        if (sampleEnd > limit) break;
+        if (sampleEnd > byteCap) break;
         if (this.index.offset[j] > end + 262144) break;
         end = sampleEnd;
       }
+      return end;
+    }
+
+    async fetchWindow(startIndex) {
+      const offset = this.index.offset[startIndex];
+      const end = this.windowEnd(startIndex);
       const res = await fetch(this.video.currentSrc, {
         headers: { Range: 'bytes=' + offset + '-' + (end - 1) },
       });
       if (res.status !== 200 && res.status !== 206) throw new Error('sample ' + res.status);
-      const buf = new Uint8Array(await res.arrayBuffer());
-      this.cache = buf;
-      this.cacheStart = offset;
-      return buf.slice(0, Math.min(size, buf.length));
+      return { start: offset, buf: new Uint8Array(await res.arrayBuffer()) };
     }
 
-    async pump() {
+    trimChunks() {
+      const keepFrom = this.index.offset[Math.max(0, this.nextSample - 2)];
+      this.chunks = this.chunks.filter((chunk) => chunk.start + chunk.buf.length > keepFrom);
+    }
+
+    noteNetError(error) {
+      this.netErrors += 1;
+      log('smooth fetch', error);
+      if (this.netErrors >= 4) this.fail();
+    }
+
+    schedulePrefetch(i) {
+      if (this.prefetch || i + 1 >= this.index.count) return;
+      const rate = this.video.playbackRate || 2;
+      const lead = Math.max(1.5, rate);
+      let uncovered = i;
+      while (
+        uncovered < this.index.count &&
+        this.findChunk(this.index.offset[uncovered], this.index.size[uncovered])
+      ) {
+        uncovered += 1;
+      }
+      if (uncovered >= this.index.count) return;
+      if (this.index.pts[uncovered] - this.index.pts[i] > lead) return;
+      const gen = this.gen;
+      const job = this.fetchWindow(uncovered)
+        .then((chunk) => {
+          if (gen !== this.gen) return;
+          this.chunks.push(chunk);
+          this.trimChunks();
+          this.netErrors = 0;
+        })
+        .catch((error) => {
+          if (gen !== this.gen) return;
+          this.noteNetError(error);
+        })
+        .finally(() => {
+          if (this.prefetch === job) this.prefetch = null;
+        });
+      this.prefetch = job;
+    }
+
+    async readSample(i) {
+      const offset = this.index.offset[i];
+      const size = this.index.size[i];
+      let chunk = this.findChunk(offset, size);
+      if (chunk) {
+        this.schedulePrefetch(i);
+        const start = offset - chunk.start;
+        return chunk.buf.slice(start, start + size);
+      }
+      if (this.prefetch) await this.prefetch;
+      chunk = this.findChunk(offset, size);
+      if (!chunk) {
+        chunk = await this.fetchWindow(i);
+        if (this.gen !== this.generationAtRead) return chunk.buf.slice(0, Math.min(size, chunk.buf.length));
+        this.chunks.push(chunk);
+        this.trimChunks();
+        this.netErrors = 0;
+      }
+      const start = offset - chunk.start;
+      return chunk.buf.slice(start, start + Math.min(size, chunk.buf.length - start));
+    }
+
+    async pump(t) {
       if (this.pumping || !this.decoder || this.decoder.state !== 'configured') return;
       this.pumping = true;
       const gen = this.gen;
+      const rate = this.video.playbackRate || 2;
+      const ahead = Math.max(1.5, rate * 0.8);
       try {
         while (gen === this.gen && this.decoder && this.decoder.state === 'configured') {
-          if (this.decoder.decodeQueueSize > 8 || this.queue.length > 16) break;
+          if (this.decoder.decodeQueueSize > 12 || this.queue.length > 32) break;
           if (this.nextSample >= this.index.count) break;
           const i = this.nextSample;
           const pts = this.index.pts[i];
-          if (pts > this.video.currentTime + 0.45 && this.queue.length > 1) break;
+          if (pts > t + ahead && this.queue.length > 2) break;
+          this.generationAtRead = gen;
           const bytes = await this.readSample(i);
           if (gen !== this.gen || !this.decoder || this.decoder.state !== 'configured') break;
           this.decoder.decode(
@@ -794,10 +878,10 @@
             })
           );
           this.nextSample += 1;
+          this.netErrors = 0;
         }
       } catch (error) {
-        log('smooth pump', error);
-        this.fail();
+        if (gen === this.gen) this.noteNetError(error);
       } finally {
         this.pumping = false;
       }
@@ -1279,7 +1363,7 @@
     setInterval(tick, 500);
 
     console.info(
-      `[SJTUSpeedup] v1.0.2 active — base ${formatControlRate(controller.getBaseRate())}. Hold O/P 0.5s to temp slow/boost.`
+      `[SJTUSpeedup] v1.0.3 active — base ${formatControlRate(controller.getBaseRate())}. Hold O/P 0.5s to temp slow/boost.`
     );
   }
 

@@ -51,6 +51,7 @@ for (const name of [
   'formatMenuRate',
   'needsSmoothRate',
   'sampleAtTime',
+  'shouldResyncClock',
 ]) {
   // eslint-disable-next-line no-new-func
   sandbox[name] = new Function(
@@ -79,5 +80,8 @@ const key = new Uint8Array([1, 0, 0, 1, 0]);
 assert.strictEqual(sandbox.sampleAtTime(pts, key, 0.09), 0);
 assert.strictEqual(sandbox.sampleAtTime(pts, key, 3.04), 3);
 assert.strictEqual(sandbox.sampleAtTime(pts, key, 0), 0);
+assert.strictEqual(sandbox.shouldResyncClock(-0.6, 0), true);
+assert.strictEqual(sandbox.shouldResyncClock(3, 3), false);
+assert.strictEqual(sandbox.shouldResyncClock(3, 9), true);
 
 console.log('sjtu speeder compat: ok');
