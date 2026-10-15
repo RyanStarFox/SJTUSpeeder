@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SJTUSpeedup — 课堂回看倍速
 // @namespace    https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/
-// @version      1.0.5
+// @version      1.0.6
 // @description  为交大课堂回看增加更多倍速、记忆上次倍速，并支持长按 O/P 临时变速
 // @author       SJTUSpeedup
 // @match        https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/*
@@ -583,6 +583,7 @@
       this.anchorWall = null;
       this.anchorMedia = 0;
       this.lastActual = null;
+      this.lastCursor = -1;
       this.canvas = document.createElement('canvas');
       this.canvas.className = 'sjtu-smooth-canvas';
       this.canvas.width = video.videoWidth || 1920;
@@ -652,6 +653,7 @@
       this.decoder = null;
       this.chunks = [];
       this.prefetch = null;
+      this.lastCursor = -1;
       this.nextSample = sampleAtTime(this.index.pts, this.index.key, this.video.currentTime);
       try {
         this.openDecoder();
@@ -726,13 +728,15 @@
       const t = this.mediaNow();
       const newest = this.queue[this.queue.length - 1];
       const cursor = Math.min(this.nextSample, this.index.count - 1);
-      if (
+      // 关键帧可能隔了十几秒。从那一帧追到当前进度时，画面本来就暂时偏旧，
+      // 不能因此重置解码器，否则永远停在关键帧上，看起来像幻灯片。
+      const stalled =
+        this.lastCursor === cursor &&
         newest &&
-        !this.prefetch &&
         newest.timestamp / 1e6 < t - 8 &&
-        this.index.pts[cursor] < t - 8 &&
-        performance.now() - this.lastResync > 2000
-      ) {
+        performance.now() - this.lastResync > 2000;
+      this.lastCursor = cursor;
+      if (stalled && !this.prefetch && !this.pumping) {
         this.resync();
         return;
       }
@@ -1370,7 +1374,7 @@
     setInterval(tick, 500);
 
     console.info(
-      `[SJTUSpeedup] v1.0.5 active — base ${formatControlRate(controller.getBaseRate())}. Hold O/P 0.5s to temp slow/boost.`
+      `[SJTUSpeedup] v1.0.6 active — base ${formatControlRate(controller.getBaseRate())}. Hold O/P 0.5s to temp slow/boost.`
     );
   }
 
