@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SJTUSpeedup — 课堂回看倍速
 // @namespace    https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/
-// @version      1.0.4
+// @version      1.0.5
 // @description  为交大课堂回看增加更多倍速、记忆上次倍速，并支持长按 O/P 临时变速
 // @author       SJTUSpeedup
 // @match        https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/*
@@ -765,9 +765,10 @@
     }
 
     bufferMediaSeconds() {
-      // 按墙上的时间留大约 10 秒。3 倍时就是 30 秒片长，而不是只留 3 秒。
+      // 墙上能播多久跟着倍率走：3 倍大约 12 秒，4 倍大约 16 秒。再乘一次倍率才是要下载的片长。
       const rate = this.video.playbackRate || 2;
-      return Math.min(45, Math.max(8, rate * 10));
+      const wallSeconds = Math.min(20, rate * 4);
+      return wallSeconds * rate;
     }
 
     windowEnd(startIndex) {
@@ -775,7 +776,7 @@
       const origin = this.index.pts[startIndex];
       const offset = this.index.offset[startIndex];
       let end = offset + this.index.size[startIndex];
-      const byteCap = offset + 25165824;
+      const byteCap = offset + 33554432;
       for (let j = startIndex; j < this.index.count; j += 1) {
         if (this.index.pts[j] - origin > span) break;
         const sampleEnd = this.index.offset[j] + this.index.size[j];
@@ -1369,7 +1370,7 @@
     setInterval(tick, 500);
 
     console.info(
-      `[SJTUSpeedup] v1.0.4 active — base ${formatControlRate(controller.getBaseRate())}. Hold O/P 0.5s to temp slow/boost.`
+      `[SJTUSpeedup] v1.0.5 active — base ${formatControlRate(controller.getBaseRate())}. Hold O/P 0.5s to temp slow/boost.`
     );
   }
 
